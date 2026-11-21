@@ -1,27 +1,25 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, AlertCircle } from 'lucide-react';
+import {
+  CheckCircle2,
+  AlertCircle,
+  Copy,
+  Download,
+  Search,
+  X,
+} from 'lucide-react';
 import { HeaderBar } from './components/HeaderBar';
 import { InputPanel } from './components/InputPanel';
 import { ExcelTablePanel } from './components/ExcelTablePanel';
+import { RowDetailSheet } from './components/RowDetailSheet';
 import type { PlanRow } from './types/plan';
 import {
   buildFullPath,
   getTodayFormatted,
   parseReferenceLines,
 } from './utils/pathUtils';
-import {
-  checkExcelPermission,
-  loadExcelHandle,
-  requestExcelPermission,
-  saveExcelHandle,
-  type ExtendedFileSystemFileHandle,
-} from './utils/excelHandleDb';
-import {
-  appendRowsToExcelHandle,
-  downloadSnapshotWorkbook,
-} from './utils/excelSheetJs';
+import { exportPlansToExcel } from './utils/excelSheetJs';
 
-const STORAGE_KEY = 'plans_finder_auto_excel_rows_v1';
+const STORAGE_KEY = 'plans_finder_mobile_rows_v1';
 
 export default function App() {
   const [rows, setRows] = useState<PlanRow[]>(() => {
@@ -37,42 +35,11 @@ export default function App() {
 
   const [referenceText, setReferenceText] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-
-  const [excelHandle, setExcelHandle] =
-    useState<ExtendedFileSystemFileHandle | null>(null);
-  const [hasWritePermission, setHasWritePermission] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-
-  const [statusBanner, setStatusBanner] = useState<{
-    type: 'success' | 'warning' | 'error';
-    message: string;
-  } | null>(null);
-
+  const [detailRowId, setDetailRowId] = useState<string | null>(null);
   const [toast, setToast] = useState<{
-    type: 'success' | 'warning' | 'error';
+    type: 'success' | 'error';
     message: string;
   } | null>(null);
-
-  // Restore saved Excel file handle from IndexedDB on mount
-  useEffect(() => {
-    let active = true;
-    loadExcelHandle()
-      .then(async (handle) => {
-        if (!active || !handle) return;
-        setExcelHandle(handle);
-        const perm = await checkExcelPermission(handle);
-        if (active) {
-          setHasWritePermission(perm === 'granted');
-        }
-      })
-      .catch(() => {
-        // Ignore IndexedDB unavailability
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   useEffect(() => {
     try {
@@ -84,7 +51,7 @@ export default function App() {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 3200);
+    const timer = window.setTimeout(() => setToast(null), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -93,10 +60,12 @@ export default function App() {
     [referenceText]
   );
 
-  const showToast = (
-    type: 'success' | 'warning' | 'error',
-    message: string
-  ) => {
+  const detailRow = useMemo(
+    () => rows.find((r) => r.id === detailRowId) ?? null,
+    [rows, detailRowId]
+  );
+
+  const showToast = (type: 'success' | 'error', message: string) => {
     setToast({ type, message });
   };
 
@@ -122,81 +91,33 @@ export default function App() {
     }
   };
 
-  const handleConnectExcel = async () => {
-    if (typeof window.showOpenFilePicker !== 'function') {
-      const msg =
-        'File System Access API is not supported in this browser or embedded frame. Please open this app directly in Chrome or Edge on PC.';
-      setStatusBanner({ type: 'error', message: msg });
-      showToast('error', msg);
-      return;
-    }
+  const handleAdd = () => {
+    if (parsedRefs.length === 0) return;
+    const today = getTodayFormatted();
+    const now = Date.now();
 
-    setIsConnecting(true);
-    try {
-      const [handle] = await window.showOpenFilePicker({
-        multiple: false,
-        types: [
-          {
-            description: 'Excel Workbook (.xlsx, .xlsm)',
-            accept: {
-              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-                ['.xlsx'],
-              'application/vnd.ms-excel.sheet.macroEnabled.12': ['.xlsm'],
-            },
-          },
-        ],
-      });
+    const newRows: PlanRow[] = parsedRefs.map((ref, idx) => ({
+      id: crypto.randomUUID(),
+      date: today,
+      plant: '1310',
+      mold: ref.mold,
+      insert: ref.insert,
+      neededQty: '1',
+      hydraStatus: 'No',
+      manufRepair: 'Manufacture',
+      deadline: '',
+      status2: '',
+      createdAt: now + idx,
+    }));
 
-      if (!handle) return;
-
-      const granted = await requestExcelPermission(handle);
-      if (!granted) {
-        setStatusBanner({
-          type: 'warning',
-          message: 'Write permission was not granted for the selected Excel file.',
-        });
-        return;
-      }
-
-      await saveExcelHandle(handle);
-      setExcelHandle(handle);
-      setHasWritePermission(true);
-      setStatusBanner(null);
-      showToast('success', `Connected to ${handle.name}`);
-    } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return;
-      }
-      if (err instanceof DOMException && err.name === 'SecurityError') {
-        const msg =
-          'Excel file picker is blocked inside an embedded iframe. Open this app in its own Chrome or Edge tab to connect a local Excel file.';
-        setStatusBanner({ type: 'error', message: msg });
-        showToast('error', msg);
-        return;
-      }
-      const msg =
-        err instanceof Error ? err.message : 'Failed to connect Excel file.';
-      setStatusBanner({ type: 'error', message: msg });
-      showToast('error', msg);
-    } finally {
-      setIsConnecting(false);
-    }
-  };
-
-  const handleReconnectPermission = async () => {
-    if (!excelHandle) return;
-    try {
-      const granted = await requestExcelPermission(excelHandle);
-      setHasWritePermission(granted);
-      if (granted) {
-        setStatusBanner(null);
-        showToast('success', `Write access restored for ${excelHandle.name}`);
-      } else {
-        showToast('warning', 'Write permission is required to auto-save.');
-      }
-    } catch {
-      showToast('error', 'Could not restore file permission. Click CHANGE EXCEL FILE.');
-    }
+    setRows((prev) => [...newRows, ...prev]);
+    setReferenceText('');
+    showToast(
+      'success',
+      newRows.length === 1
+        ? `Added ${newRows[0].mold}${newRows[0].insert ? `-${newRows[0].insert}` : ''}`
+        : `Added ${newRows.length} parts`
+    );
   };
 
   const handleCopyPath = () => {
@@ -205,75 +126,9 @@ export default function App() {
     copyToClipboard(
       text,
       parsedRefs.length === 1
-        ? `Copied path: ${parsedRefs[0].fullPath}`
-        : `Copied ${parsedRefs.length} paths to clipboard.`
+        ? `Copied: ${parsedRefs[0].shortName}`
+        : `Copied ${parsedRefs.length} paths`
     );
-  };
-
-  const handleAddAndSave = async () => {
-    if (parsedRefs.length === 0) return;
-
-    if (!excelHandle) {
-      setStatusBanner({
-        type: 'warning',
-        message: 'Please Connect to Excel File First',
-      });
-      showToast('warning', 'Please Connect to Excel File First');
-      return;
-    }
-
-    setIsSaving(true);
-    try {
-      const granted = await requestExcelPermission(excelHandle);
-      setHasWritePermission(granted);
-      if (!granted) {
-        setStatusBanner({
-          type: 'warning',
-          message: 'Please grant write access to the connected Excel file.',
-        });
-        return;
-      }
-
-      const today = getTodayFormatted();
-      const now = Date.now();
-      const newRows: PlanRow[] = parsedRefs.map((ref, idx) => ({
-        id: crypto.randomUUID(),
-        date: today,
-        plant: '1310',
-        mold: ref.mold,
-        insert: ref.insert,
-        neededQty: '1',
-        hydraStatus: 'No',
-        manufRepair: 'Manufacture',
-        deadline: '',
-        status2: '',
-        createdAt: now + idx,
-      }));
-
-      await appendRowsToExcelHandle(excelHandle, newRows);
-
-      setRows((prev) => [...newRows, ...prev]);
-      setReferenceText('');
-      setStatusBanner({
-        type: 'success',
-        message: 'Saved to Excel Automatically!',
-      });
-      showToast('success', 'Saved to Excel Automatically!');
-    } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Could not write to Excel file. Make sure the file is not locked by another program.';
-      setStatusBanner({ type: 'error', message: msg });
-      showToast('error', msg);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleClear = () => {
-    setReferenceText('');
-    setStatusBanner(null);
   };
 
   const handleUpdateRow = (id: string, field: keyof PlanRow, value: string) => {
@@ -284,6 +139,7 @@ export default function App() {
 
   const handleDeleteRow = (id: string) => {
     setRows((prev) => prev.filter((row) => row.id !== id));
+    showToast('success', 'Part removed');
   };
 
   const filteredRows = useMemo(() => {
@@ -306,74 +162,121 @@ export default function App() {
     if (paths.length === 0) return;
     copyToClipboard(
       paths.join('\n'),
-      `Copied ${paths.length} ${paths.length === 1 ? 'path' : 'paths'} to clipboard.`
+      `Copied ${paths.length} ${paths.length === 1 ? 'path' : 'paths'}`
     );
   };
 
-  const handleExportBackup = () => {
+  const handleExportExcel = () => {
     const targetRows = filteredRows.length > 0 ? filteredRows : rows;
     if (targetRows.length === 0) return;
-    downloadSnapshotWorkbook(targetRows);
-    showToast('success', `Downloaded backup .xlsx (${targetRows.length} rows).`);
+    exportPlansToExcel(targetRows);
+    showToast('success', `Exported ${targetRows.length} parts (.xlsx)`);
   };
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#F4F6F9] text-slate-900">
-      <HeaderBar
-        totalRows={rows.length}
-        connectedFileName={excelHandle?.name ?? null}
-        hasWritePermission={hasWritePermission}
-        onConnectExcel={handleConnectExcel}
-        onReconnectPermission={handleReconnectPermission}
-        isConnecting={isConnecting}
-      />
+    <div className="min-h-screen flex flex-col bg-[#F4F6F9] text-slate-900 pb-20">
+      <HeaderBar totalRows={rows.length} />
 
-      <div className="flex-1 flex min-h-0 overflow-hidden">
+      {/* Main Single-Column Mobile Stack */}
+      <main className="w-full max-w-2xl mx-auto px-3 pt-3 flex-1 flex flex-col gap-3">
+        {/* Big Search Bar on Top */}
+        <div className="relative">
+          <Search className="w-5 h-5 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search Mold or Insert..."
+            aria-label="Search Mold or Insert"
+            className="w-full min-h-[48px] rounded-xl border border-slate-300 bg-white pl-11 pr-11 text-base text-slate-900 placeholder:text-slate-400 focus:border-[#0A1E5C] focus:outline-none focus:ring-2 focus:ring-[#0A1E5C]/15"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              aria-label="Clear search"
+              className="absolute right-1 top-1/2 -translate-y-1/2 min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Input Section */}
         <InputPanel
           referenceText={referenceText}
           onReferenceTextChange={setReferenceText}
           parsedRefs={parsedRefs}
+          onAdd={handleAdd}
           onCopyPath={handleCopyPath}
-          onAddAndSave={handleAddAndSave}
-          onClear={handleClear}
-          isSaving={isSaving}
-          statusBanner={statusBanner}
         />
 
+        {/* Scrollable Table Below Input */}
         <ExcelTablePanel
           rows={rows}
           filteredRows={filteredRows}
           searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
+          onClearSearch={() => setSearchQuery('')}
           onUpdateRow={handleUpdateRow}
-          onDeleteRow={handleDeleteRow}
-          onExportBackup={handleExportBackup}
-          onCopyAllPaths={handleCopyAllPaths}
+          onSelectDetailRow={(row) => setDetailRowId(row.id)}
           onCopySinglePath={(fullPath) =>
-            copyToClipboard(fullPath, `Copied path: ${fullPath}`)
+            copyToClipboard(fullPath, `Copied: ${fullPath}`)
           }
         />
+      </main>
+
+      {/* Sticky Bottom Thumb Action Bar */}
+      <div className="fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 px-3 py-2.5">
+        <div className="w-full max-w-2xl mx-auto grid grid-cols-2 gap-2.5">
+          <button
+            type="button"
+            onClick={handleExportExcel}
+            disabled={rows.length === 0}
+            className="min-h-[48px] bg-[#FF6A00] hover:bg-[#E55F00] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-sm font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+          >
+            <Download className="w-4 h-4 shrink-0" />
+            <span>Export to Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCopyAllPaths}
+            disabled={filteredRows.length === 0}
+            className="min-h-[48px] bg-[#0A1E5C] hover:bg-[#08184A] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-sm font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+          >
+            <Copy className="w-4 h-4 shrink-0" />
+            <span>Copy All Paths</span>
+          </button>
+        </div>
       </div>
 
+      {/* Detail View Bottom Sheet for Plant, Hydra Status & status2 */}
+      <RowDetailSheet
+        row={detailRow}
+        onClose={() => setDetailRowId(null)}
+        onUpdateRow={handleUpdateRow}
+        onDeleteRow={handleDeleteRow}
+        onCopyPath={(fullPath) =>
+          copyToClipboard(fullPath, `Copied: ${fullPath}`)
+        }
+      />
+
+      {/* Mobile Toast Above Sticky Bottom Bar */}
       {toast && (
         <div
           role="status"
-          className={`fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-md shadow-lg border text-xs font-semibold flex items-center gap-2 ${
+          className={`fixed bottom-20 left-3 right-3 z-40 max-w-md mx-auto px-4 py-3 rounded-xl shadow-lg border text-sm font-semibold flex items-center gap-2 ${
             toast.type === 'success'
-              ? 'bg-emerald-700 text-white border-emerald-800'
-              : toast.type === 'warning'
-              ? 'bg-amber-500 text-slate-950 border-amber-600'
+              ? 'bg-[#0A1E5C] text-white border-[#1E3A8A]'
               : 'bg-red-700 text-white border-red-800'
           }`}
         >
           {toast.type === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
-          ) : toast.type === 'warning' ? (
-            <AlertTriangle className="w-4 h-4 text-slate-950 shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-[#FF6A00] shrink-0" />
           ) : (
             <AlertCircle className="w-4 h-4 text-white shrink-0" />
           )}
-          <span className="max-w-md truncate">{toast.message}</span>
+          <span className="truncate">{toast.message}</span>
         </div>
       )}
     </div>
