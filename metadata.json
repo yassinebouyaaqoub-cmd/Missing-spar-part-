@@ -1,0 +1,6 @@
+{
+  "name": "Plans Finder - Email Parser",
+  "description": "Industrial PC desktop workspace for AI-powered mold and insert email parsing, plan path generation, and Excel export with live hyperlink formulas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
